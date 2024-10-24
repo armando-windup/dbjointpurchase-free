@@ -71,10 +71,40 @@ class Dbjointpurchase extends Module
             $this->registerHook('displayHeader') &&
             $this->registerHook('displayBackOfficeHeader') &&
             $this->registerHook('displayFooterProduct');
+
+             // Nueva tabla de productos relacionados
+        $sql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'dbjointpurchase_product` (
+        `id_dbjointpurchase_product` INT(11) NOT NULL AUTO_INCREMENT,
+        `id_product` INT(11) NOT NULL,
+        `id_associated_product` INT(11) NOT NULL,
+        PRIMARY KEY (`id_dbjointpurchase_product`),
+        UNIQUE KEY `product_association` (`id_product`, `id_associated_product`)
+        ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8;';
+
+        if (!Db::getInstance()->execute($sql)) {
+            return false;
+        }
+
+            // Registrar nuevos hooks
+        return parent::install() &&
+        $this->registerHook('displayHeader') &&
+        $this->registerHook('displayBackOfficeHeader') &&
+        $this->registerHook('displayFooterProduct') &&
+        $this->registerHook('displayAdminProductsMainStepLeftColumnBottom') &&
+        $this->registerHook('actionAdminControllerSetMedia') &&
+        $this->registerHook('actionProductUpdate');
+}
     }
 
     public function uninstall()
     {
+           // Borrar tabla de relacionados
+    $sql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'dbjointpurchase_product`;';
+
+    if (!Db::getInstance()->execute($sql)) {
+        return false;
+    }
+
         return parent::uninstall();
     }
 
@@ -429,5 +459,121 @@ class Dbjointpurchase extends Module
         }
 
         return $excludes;
+    }
+}
+
+public function hookDisplayAdminProductsMainStepLeftColumnBottom($params)
+{
+    $id_product = (int)$params['id_product'];
+    $associated_products = $this->getAssociatedProducts($id_product);
+
+    $this->context->smarty->assign(array(
+        'associated_products' => $associated_products,
+        'token' => Tools::getAdminTokenLite('AdminProducts'),
+        'module_dir' => $this->_path,
+    ));
+
+    return $this->display(__FILE__, 'views/templates/admin/associated_products.tpl');
+}
+
+public function getAssociatedProducts($id_product)
+{
+    $sql = 'SELECT `id_associated_product` FROM `' . _DB_PREFIX_ . 'dbjointpurchase_product` WHERE `id_product` = ' . (int)$id_product;
+    $result = Db::getInstance()->executeS($sql);
+
+    $associated_products = array();
+    if ($result) {
+        foreach ($result as $row) {
+            $associated_products[] = (int)$row['id_associated_product'];
+        }
+    }
+    return $associated_products;
+}
+
+public function hookActionAdminControllerSetMedia($params)
+{
+    $controller = $this->context->controller;
+    if ($controller instanceof AdminProductsController) {
+        $controller->addJquery();
+        $controller->addJS($this->_path . 'views/js/jquery.tokeninput.js');
+        $controller->addCSS($this->_path . 'views/css/token-input-facebook.css');
+    }
+}
+
+public function hookActionProductUpdate($params)
+{
+    $id_product = (int)$params['id_product'];
+    $associated_products = Tools::getValue('dbjointpurchase_associated_products');
+
+    if ($associated_products) {
+        $associated_products = array_slice(array_unique(array_map('intval', explode(',', $associated_products))), 0, 3);
+    } else {
+        $associated_products = array();
+    }
+
+    // Delete existing associations
+    Db::getInstance()->delete('dbjointpurchase_product', 'id_product = ' . $id_product);
+
+    // Insert new associations
+    foreach ($associated_products as $id_associated_product) {
+        Db::getInstance()->insert('dbjointpurchase_product', array(
+            'id_product' => $id_product,
+            'id_associated_product' => $id_associated_product,
+        ));
+    }
+}
+
+public function hookDisplayFooterProduct($params)
+{
+    $product = $params['product'];
+    $id_product = $params['product']->id;
+    $key = 'dbjointpurchase|' . $id_product;
+    $total_price = $params['product']->price_amount;
+
+    // Check if there are manually associated products
+    $associated_products = $this->getAssociatedProducts($id_product);
+
+    if (!empty($associated_products)) {
+        // Use the associated products
+        $products_to_display = array();
+        foreach ($associated_products as $id_associated_product) {
+            $products_to_display[] = array('id_product' => $id_associated_product);
+        }
+        $productos = $this->prepareBlocksProducts($products_to_display);
+        foreach ($productos as $pr) {
+            $total_price += $pr['price_amount'];
+        }
+
+        $this->smarty->assign(array(
+            'productos' => array($productos),
+            'total_price' => $total_price,
+            'premium' => $this->premium,
+        ));
+
+        return $this->fetch('module:dbjointpurchase/views/templates/hook/jointpurchase.tpl');
+    } else {
+        // Use existing logic
+        $products_cat = $this->getProductsGenerate($id_product);
+        if ($products_cat != false && $product['add_to_cart_url']) {
+            if (!$this->isCached(
+                'module:dbjointpurchase/views/templates/hook/jointpurchase.tpl',
+                $this->getCacheId($key)
+            )) {
+                $productos = [];
+                foreach ($products_cat as $key => $products) {
+                    $productos[$key] = $this->prepareBlocksProducts($products);
+                    foreach ($productos[$key] as $pr) {
+                        $total_price += $pr['price_amount'];
+                    }
+                }
+                $this->smarty->assign(array(
+                    'productos' => $productos,
+                    'total_price' => $total_price,
+                    'premium' => $this->premium,
+                ));
+            }
+
+            return $this->fetch('module:dbjointpurchase/views/templates/hook/jointpurchase.tpl');
+        }
     }
 }
